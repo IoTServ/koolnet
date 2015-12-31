@@ -86,6 +86,7 @@ func (p2pc *P2pClient) Calls() chan *common.Future {
 
 func (p2pc *P2pClient) Close() {
 	for _, p := range p2pc.portMap {
+		//The p is already killed hear
 		delete(p2pc.portMap, p.tcpPort)
 		<-p.Dead()
 		p.Close()
@@ -108,6 +109,7 @@ func (p2pc *P2pClient) Close() {
 	}
 }
 
+//ms
 func iclock() int32 {
 	return int32((time.Now().UnixNano() / 1000000) & 0xffffffff)
 }
@@ -131,30 +133,22 @@ func (p2pc *P2pClient) NewConn(conn net.Conn, port int, tPort int, isProxy bool,
 		innerPort: port,
 		tcpPort:   tcpPort,
 		tcpConn:   conn,
+		rlist:     make([]*common.MsgBuf, 0, 16),
 		in:        make(chan *common.MsgBuf, 10),
 		wMsg:      make(chan *common.MsgBuf, 10),
 	}
 
-	if isProxy {
-		//p2pclient context
+	//Use promise to run in p2pclient thread context, than modify the portMap only in p2pclient context
+	common.NewPromise(c).Then(func(pt common.PromiseTask, arg interface{}) (common.PromiseTask, interface{}, error) {
+		p2pc := pt.(*P2pClient)
+		p2pConn := arg.(*P2pConn)
 		p2pc.portMap[p2pConn.tcpPort] = p2pConn
 		common.Info("NewConn len", len(p2pc.portMap))
 		killable.Go(p2pConn, func() error {
 			return p2pConn.Run(p2pc, c)
 		})
-	} else {
-		//other thread context
-		common.NewPromise(c).Then(func(pt common.PromiseTask, arg interface{}) (common.PromiseTask, interface{}, error) {
-			p2pc := pt.(*P2pClient)
-			p2pConn := arg.(*P2pConn)
-			p2pc.portMap[p2pConn.tcpPort] = p2pConn
-			common.Info("NewConn len", len(p2pc.portMap))
-			killable.Go(p2pConn, func() error {
-				return p2pConn.Run(p2pc, c)
-			})
-			return nil, nil, nil
-		}).Resolve(p2pc, p2pConn)
-	}
+		return nil, nil, nil
+	}).Resolve(p2pc, p2pConn)
 
 	common.Info("tcpPort=", p2pConn.tcpPort, "innertPort=", port)
 }
@@ -584,26 +578,37 @@ func (p2pc *P2pClient) tryToRecvFor(c *Client) error {
 		} else {
 			switch hdr.Type {
 			case common.MsgTypeSyn:
-				proxyAddr := c.conf.tunnels[toInnerPort].ProxyAddr
-				tcpConn, err := net.DialTimeout("tcp", proxyAddr, common.TcpTimeoutSec)
-				if nil == err {
-					tcpConn.SetReadDeadline(time.Time{})
-					p2pc.NewConn(tcpConn, toInnerPort, fromTcpPort, true, c)
-				} else {
-					common.Warn("p2pclient dial error", err)
+				proxyAddrConf := c.conf.tunnels[toInnerPort].ProxyAddr
+				//Use goroutine to dial tcp
+				go func(proxyAddr string) {
+					tcpConn, err := net.DialTimeout("tcp", proxyAddr, common.TcpTimeoutSec)
+					if nil == err {
+						tcpConn.SetReadDeadline(time.Time{})
+						//After initial complete, tell remote we are ready
+						p2pc.NewConn(tcpConn, toInnerPort, fromTcpPort, true, c)
+					} else {
+						common.Warn("p2pclient dial error", fromTcpPort, err)
 
-					//Response error
-					rMsg := common.NewMsg(0)
-					defer rMsg.Free()
-					rMsg.Hdr = common.MsgHdr{
-						Type: common.MsgTypeSynErr,
-						Port: uint16(toInnerPort),
-						Seq:  uint16(fromTcpPort),
+						//Response error
+						mb := common.NewMsgBuf()
+						defer mb.Free()
+						hdr = common.MsgHdr{
+							Type: common.MsgTypeSynErr,
+							Port: uint16(toInnerPort),
+							Seq:  uint16(fromTcpPort),
+						}
+						bf := bytes.NewBuffer(make([]byte, 0, common.MsgHdrSize))
+						binary.Write(bf, binary.BigEndian, hdr)
+						copy(mb.GetBuf(), bf.Bytes())
+						mb.Size = common.MsgHdrSize
+						select {
+						case <-p2pc.Dying():
+						case p2pc.wMsg <- mb.Dup():
+						}
 					}
-					rMsg.Real = nil
-					binary.Write(rMsg.GetOrigin(), binary.BigEndian, rMsg.Hdr)
-					ikcp.Ikcp_send(p2pc.kcp, rMsg.GetOrigin().Bytes(), rMsg.GetOrigin().Len())
-				}
+				}(proxyAddrConf)
+			default:
+				common.Warn("message ignore", hdr.Type, fromTcpPort)
 			}
 		}
 
@@ -767,8 +772,11 @@ func (p2pc *P2pClient) DoDying(c *Client) {
 func (p2pc *P2pClient) RemoveConn(p *P2pConn) {
 	p.Kill(common.ErrMsgKilled)
 	if _, ok := p2pc.portMap[p.tcpPort]; ok {
+		//Delete from map than close it
 		delete(p2pc.portMap, p.tcpPort)
+		//Wait for dead
 		<-p.Dead()
+		//Close all channel
 		p.Close()
 	}
 	common.Info("RemoveConn ", p.tcpPort, "RemoteConn len", len(p2pc.portMap))

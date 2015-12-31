@@ -1146,5 +1146,6 @@ func Ikcp_wndsize(kcp *Ikcpcb, sndwnd, rcvwnd int32) int32 {
 }
 
 func Ikcp_waitsnd(kcp *Ikcpcb) int32 {
+	//待确认的数量+待发送的队列长度
 	return int32(kcp.nsnd_buf + kcp.nsnd_que)
 }

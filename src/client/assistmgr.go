@@ -269,19 +269,28 @@ func (ass *AssistMgr) handleIncomeMsg(msg *common.Msg) {
 		ass.out <- msg.Dup()
 	case common.MsgTypeP2pTest:
 		msgPing := msg.GetReal().(*common.MsgUdpPong)
-		if udpAddr, err := net.ResolveUDPAddr("udp", msgPing.Addr); err != nil {
-			log.Println("error for resolve udp", msgPing.Addr, err)
-			return
-		} else {
-			//Just mark as different
-			oldSeq := msg.Hdr.Seq
-			msg.Hdr.Seq += 10000
-			common.WriteUdpMsgServer(msg.Dup(), udpAddr, ass.udpConn)
-			//restore back to old seq
-			msg.Hdr.Seq = oldSeq
-		}
-		//log.Println("response to server")
-		ass.out <- msg.Dup()
+		go func(m *common.Msg) {
+			defer m.Free()
+
+			if udpAddr, err := net.ResolveUDPAddr("udp", msgPing.Addr); err != nil {
+				log.Println("error for resolve udp", msgPing.Addr, err)
+				return
+			} else {
+				//Just mark as different
+				oldSeq := m.Hdr.Seq
+				m.Hdr.Seq += 10000
+				for i := 0; i < 2; i++ {
+					common.WriteUdpMsgServer(m.Dup(), udpAddr, ass.udpConn)
+					time.Sleep(20 * time.Millisecond)
+				}
+				//restore back to old seq
+				m.Hdr.Seq = oldSeq
+			}
+			//log.Println("response to server")
+			//TODO what if ass.out is closed?
+			ass.out <- m.Dup()
+		}(msg.Dup())
+
 	case common.MsgTypeAssPong:
 	}
 }

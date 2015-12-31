@@ -275,9 +275,10 @@ func (c *Client) Run() error {
 	tick := time.NewTicker(common.TcpClientPingSec)
 	defer tick.Stop()
 
-	/* if c.clientId != 0 {
+	//requestP2p default when started
+	if c.clientId != 0 {
 		c.requestP2p()
-	} */
+	}
 
 	//Gen a ping to server
 	//c.udpPingServ()
@@ -324,8 +325,8 @@ func (c *Client) RunFor(tick *time.Ticker) error {
 		}
 	case nc, ok := <-c.newConn:
 		if ok {
-			//Use fix timeout
-			nc.c.SetReadDeadline(time.Now().Add(common.UdpP2pPingTimeout))
+			//TODO Use fix timeout
+			//nc.c.SetReadDeadline(time.Now().Add(common.UdpP2pPingTimeout))
 			if len(c.p2ps) == 0 {
 				c.requestP2p()
 			}
