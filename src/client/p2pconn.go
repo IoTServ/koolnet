@@ -35,7 +35,7 @@ type P2pConn struct {
 	wMsg chan *common.MsgBuf
 }
 
-func (p *P2pConn) RunFor(p2pc *P2pClient, c *Client) error {
+func (p *P2pConn) RunFor(p2pc *P2pClient, c *Client, updateChan *time.Ticker) error {
 	select {
 	case <-p2pc.Dying():
 		return common.ErrPromisePDying
@@ -47,20 +47,22 @@ func (p *P2pConn) RunFor(p2pc *P2pClient, c *Client) error {
 		if ok {
 			defer mb.Free()
 
-			switch mb.Type {
-			case common.MsgTypeData:
+			if mb.Type != common.MsgTypeSynOk {
+				if len(p.rlist) > 64 {
+					common.Warn("tcpWrite block forever, kill it")
+					p.GoDying(p2pc, c)
+					return common.ErrMsgWrite
+				}
 				p.rlist = append(p.rlist, mb.Dup())
 				p.writeAll()
-
-			case common.MsgTypeSynOk:
+			} else {
 				//Always requestor
 				common.Info("go tcpReadLoop")
 				go p.tcpReadLoop(p2pc, c)
-			case common.MsgTypeFin, common.MsgTypeSynErr:
-				p.GoDying(p2pc, c)
-				return common.ErrMsgWrite
 			}
 		}
+	case <-updateChan.C:
+		p.writeAll()
 	}
 
 	return nil
@@ -80,7 +82,7 @@ func (p *P2pConn) writeAll() {
 				//blocked, remove [0, pos) and return. The mb is not free hear
 				mb.Dup()
 				p.rlist = p.rlist[pos:]
-				common.Warn("write pos blocked", pos)
+				//common.Warn("write pos blocked", pos)
 				return
 			}
 		}
@@ -139,8 +141,11 @@ func (p *P2pConn) Run(p2pc *P2pClient, c *Client) error {
 		return err
 	}
 
+	updateChan := time.NewTicker(UPADTE_TICK * 5)
+	defer updateChan.Stop()
+
 	for {
-		if err := p.RunFor(p2pc, c); err != nil {
+		if err := p.RunFor(p2pc, c, updateChan); err != nil {
 			common.Info("P2pConn error", err)
 			return err
 		}
@@ -166,18 +171,27 @@ func (p *P2pConn) Close() {
 	for msg := range p.wMsg {
 		msg.Free()
 	}
-	for _, msg := range p.rlist {
-		msg.Free()
+	if len(p.rlist) > 0 {
+		for _, msg := range p.rlist {
+			msg.Free()
+		}
+		common.Warn("closed but rlist still have buffers", len(p.rlist))
+		p.rlist = p.rlist[len(p.rlist):]
 	}
-	p.rlist = p.rlist[len(p.rlist):]
 
-	common.Warn("p2pconn closed recv", p.rLen, p.wLen)
+	//common.Info("p2pconn closed recv", atomic.LoadInt32(&p.rLen), atomic.LoadInt32(&p.wLen))
 }
 
 func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
-	snd1 := atomic.LoadInt32(&p2pc.waitSend) * 80
+	//TODO how to named this var?
+	const (
+		A = 80
+		B = 10
+	)
 
-	tick_diff := iclock() - p.tick
+	snd1 := atomic.LoadInt32(&p2pc.waitSend) * A
+
+	tick_diff := iclock()/B - p.tick
 	diff := snd1 - p.snd
 
 	if tick_diff > 0 {
@@ -186,6 +200,8 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		if p.avg < 0 {
 			p.avg = 0
 		}
+	} else {
+		p.avg = 0
 	}
 	if diff < 0 {
 		//Send ok, so reset p.wait = 0
@@ -202,7 +218,7 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		}
 	}
 	p.snd = snd1
-	p.tick = iclock()
+	p.tick = iclock() / B
 
 	mb := common.NewMsgBuf()
 	defer mb.Free()
@@ -214,9 +230,6 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 	copy(mb.GetBuf(), bf.Bytes())
 
 	n, err := p.tcpConn.Read(mb.GetBuf()[common.MsgHdrSize:])
-	mb.Size = n + common.MsgHdrSize
-
-	atomic.AddInt32(&p.rLen, int32(n))
 
 	//wait too long, just kill myself
 	if p.wait > 10000 || nil != err {
@@ -225,7 +238,7 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		binary.Write(bf, binary.BigEndian, p.hdr)
 		copy(mb.GetBuf(), bf.Bytes())
 		mb.Size = common.MsgHdrSize
-		common.Info("tcpRead error", p.wait, err)
+		//common.Warn("tcpRead error", p.wait, err)
 
 		select {
 		//Already dying, ignore Fin message
@@ -236,6 +249,8 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		p.Kill(common.ErrMsgRead)
 		return common.ErrMsgRead
 	} else {
+		mb.Size = n + common.MsgHdrSize
+		atomic.AddInt32(&p.rLen, int32(n))
 		select {
 		case <-p2pc.Dying():
 			return common.ErrMsgKilled
@@ -248,8 +263,8 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 func (p *P2pConn) tcpReadLoop(p2pc *P2pClient, c *Client) {
 	//TODO Use fix timeout
 	//p.tcpConn.SetReadDeadline(time.Now().Add(common.UdpP2pPingTimeout))
-	p.avg = 20
-	p.tick = iclock()
+	p.avg = 10
+	p.tick = iclock() / 10
 
 	for {
 		if err := p.tcpReadLoopFor(p2pc, c); err != nil {
@@ -264,36 +279,54 @@ func (p *P2pConn) tcpWriteLoopFor(p2pc *P2pClient, c *Client) error {
 		if ok {
 			defer mb.Free()
 
-			size := mb.Size
-			wsize := 0
-		SEND_LOOP:
-			for {
-				if n, err := p.tcpConn.Write(mb.GetReal()[wsize:]); err == nil && n == (size-wsize) {
-					break SEND_LOOP
-				} else if err == nil {
-					wsize += n
-				} else {
-					//Response fin message
-					p.hdr.Type = common.MsgTypeFin
-					rmb := common.NewMsgBuf()
-					defer rmb.Free()
-					//log.Println("send_loop", rmb.Id)
+			switch mb.Type {
+			case common.MsgTypeData:
+				size := mb.Size
+				wsize := 0
+			SEND_LOOP:
+				for {
+					if n, err := p.tcpConn.Write(mb.GetReal()[wsize:]); err == nil && n == (size-wsize) {
+						wsize += n
+						break SEND_LOOP
+					} else if err == nil {
+						wsize += n
+					} else {
+						//Response fin message
+						p.hdr.Type = common.MsgTypeFin
+						rmb := common.NewMsgBuf()
+						defer rmb.Free()
+						//log.Println("send_loop", rmb.Id)
 
-					bf := bytes.NewBuffer(make([]byte, 0, common.MsgHdrSize))
-					binary.Write(bf, binary.BigEndian, p.hdr)
-					copy(rmb.GetBuf(), bf.Bytes())
-					rmb.Size = common.MsgHdrSize
-					select {
-					case <-p2pc.Dying():
-					case p2pc.wMsg <- rmb.Dup():
+						bf := bytes.NewBuffer(make([]byte, 0, common.MsgHdrSize))
+						binary.Write(bf, binary.BigEndian, p.hdr)
+						copy(rmb.GetBuf(), bf.Bytes())
+						rmb.Size = common.MsgHdrSize
+						select {
+						case <-p2pc.Dying():
+						case p2pc.wMsg <- rmb.Dup():
+						}
+
+						p.Kill(common.ErrMsgWrite)
+						return common.ErrMsgWrite
 					}
-
-					p.Kill(common.ErrMsgWrite)
-					return common.ErrMsgWrite
 				}
+
+				atomic.AddInt32(&p.wLen, int32(wsize))
+
+			case common.MsgTypeFin, common.MsgTypeSynErr:
+				//common.Info("kill by remote", atomic.LoadInt32(&p.wLen))
+				p.Kill(common.ErrMsgWrite)
+				return common.ErrMsgWrite
 			}
-			atomic.AddInt32(&p.wLen, int32(wsize))
+
+		} else {
+			//Killed, just return error
+			//common.Warn("tcpwrite error")
+			return common.ErrMsgWrite
 		}
+	case <-p.Dying():
+		//Killed, just return error
+		return common.ErrMsgWrite
 	}
 	return nil
 }

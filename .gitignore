@@ -2,3 +2,5 @@ ctest
 stest
 tags
 atest
+*.pdf
+*.pprof

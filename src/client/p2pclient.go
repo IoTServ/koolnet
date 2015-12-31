@@ -134,8 +134,8 @@ func (p2pc *P2pClient) NewConn(conn net.Conn, port int, tPort int, isProxy bool,
 		tcpPort:   tcpPort,
 		tcpConn:   conn,
 		rlist:     make([]*common.MsgBuf, 0, 16),
-		in:        make(chan *common.MsgBuf, 10),
-		wMsg:      make(chan *common.MsgBuf, 10),
+		in:        make(chan *common.MsgBuf, 16),
+		wMsg:      make(chan *common.MsgBuf, 16),
 	}
 
 	//Use promise to run in p2pclient thread context, than modify the portMap only in p2pclient context
@@ -607,6 +607,7 @@ func (p2pc *P2pClient) tryToRecvFor(c *Client) error {
 						}
 					}
 				}(proxyAddrConf)
+			case common.MsgTypeFin:
 			default:
 				common.Warn("message ignore", hdr.Type, fromTcpPort)
 			}
