@@ -1,6 +1,6 @@
 # koolnet
 P2p tunnel for router control
 
-Thanks to kcp
+Thanks to kcp: https://github.com/skywind3000/kcp
 
-Thans to kcp golang version in dogtunnel
+Thans to kcp golang version in dogtunnel: https://github.com/vzex/dog-tunnel
