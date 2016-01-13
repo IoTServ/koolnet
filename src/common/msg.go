@@ -45,7 +45,7 @@ const (
 	MsgSizeBig     = 2600
 	EncryptSize    = 16
 	MsgCtlSize     = 16
-	MsgXor         = 0x8B
+	MsgXor         = 0x9C
 
 	UdpPongTypeTwoServer = 0
 	UdpPongTypeFromAss   = 1
@@ -65,7 +65,7 @@ const (
 	UdpP2pPingTimeout     = time.Second * UdpP2pPingTick * 2
 	UdpP2pPingClose       = UdpP2pPingTimeout * 3
 
-	AssPass = "asspass"
+	AssPass = ""
 )
 
 var (
