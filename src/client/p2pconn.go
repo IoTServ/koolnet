@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"time"
@@ -25,10 +26,8 @@ type P2pConn struct {
 	rlist []*common.MsgBuf
 
 	//For read stream control
-	snd  int32
-	tick int32
-	wait int32
-	avg  int32
+	last_snd int32
+	wait     int32
 
 	hdr  common.MsgHdr
 	in   chan *common.MsgBuf
@@ -182,43 +181,35 @@ func (p *P2pConn) Close() {
 	//common.Info("p2pconn closed recv", atomic.LoadInt32(&p.rLen), atomic.LoadInt32(&p.wLen))
 }
 
-func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
-	//TODO how to named this var?
-	const (
-		A = 80
-		B = 10
-	)
-
-	snd1 := atomic.LoadInt32(&p2pc.waitSend) * A
-
-	tick_diff := iclock()/B - p.tick
-	diff := snd1 - p.snd
-
-	if tick_diff > 0 {
-		//Update avg for stream control
-		p.avg = int32((3*p.avg + diff/tick_diff) / 4)
-		if p.avg < 0 {
-			p.avg = 0
+func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) (err_rlt error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_rlt = fmt.Errorf("Panic: %v", r)
 		}
-	} else {
-		p.avg = 0
-	}
-	if diff < 0 {
-		//Send ok, so reset p.wait = 0
-		p.wait = 0
-	}
-	common.Info("avg,diff,tick_diff,wait", p.avg, diff, tick_diff, p.wait)
-	if p.avg > 10 {
-		p.wait += p.avg
+	}()
+
+	old_snd := p.last_snd
+	p.last_snd = atomic.LoadInt32(&p2pc.waitSend)
+
+	if p.last_snd > (common.MessageSeqSize >> 1) {
+		var duration int32 = 128
+		if p.last_snd < 128 {
+			duration = p.last_snd
+		}
+		p.wait += 8 * duration
 
 		select {
 		case <-p.Dying():
 			break
-		case <-time.After(time.Millisecond * time.Duration(p.avg)):
+		case <-time.After(time.Millisecond * time.Duration(8*duration)):
 		}
+		if old_snd < p.last_snd {
+			p.wait = 0
+		}
+	} else {
+		p.wait = 0
 	}
-	p.snd = snd1
-	p.tick = iclock() / B
+	common.Info("snd, wait", p.last_snd, p.wait)
 
 	mb := common.NewMsgBuf()
 	defer mb.Free()
@@ -239,6 +230,10 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		copy(mb.GetBuf(), bf.Bytes())
 		mb.Size = common.MsgHdrSize
 		//common.Warn("tcpRead error", p.wait, err)
+		if killable.IsDying(p2pc) || killable.IsDying(p) {
+			err_rlt = common.ErrMsgRead
+			return
+		}
 
 		select {
 		//Already dying, ignore Fin message
@@ -247,33 +242,41 @@ func (p *P2pConn) tcpReadLoopFor(p2pc *P2pClient, c *Client) error {
 		case p2pc.wMsg <- mb.Dup():
 		}
 		p.Kill(common.ErrMsgRead)
-		return common.ErrMsgRead
+		err_rlt = common.ErrMsgRead
+		return
 	} else {
 		mb.Size = n + common.MsgHdrSize
 		atomic.AddInt32(&p.rLen, int32(n))
 		select {
 		case <-p2pc.Dying():
-			return common.ErrMsgKilled
+			err_rlt = common.ErrMsgRead
+			return
 		case p2pc.wMsg <- mb.Dup():
 		}
-		return nil
+		err_rlt = nil
+		return
 	}
 }
 
 func (p *P2pConn) tcpReadLoop(p2pc *P2pClient, c *Client) {
 	//TODO Use fix timeout
 	//p.tcpConn.SetReadDeadline(time.Now().Add(common.UdpP2pPingTimeout))
-	p.avg = 10
-	p.tick = iclock() / 10
 
 	for {
 		if err := p.tcpReadLoopFor(p2pc, c); err != nil {
+			//common.Warn(err.Error())
 			return
 		}
 	}
 }
 
-func (p *P2pConn) tcpWriteLoopFor(p2pc *P2pClient, c *Client) error {
+func (p *P2pConn) tcpWriteLoopFor(p2pc *P2pClient, c *Client) (err_rlt error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_rlt = fmt.Errorf("Panic: %v", r)
+		}
+	}()
+
 	select {
 	case mb, ok := <-p.wMsg:
 		if ok {
@@ -307,7 +310,8 @@ func (p *P2pConn) tcpWriteLoopFor(p2pc *P2pClient, c *Client) error {
 						}
 
 						p.Kill(common.ErrMsgWrite)
-						return common.ErrMsgWrite
+						err_rlt = common.ErrMsgWrite
+						return
 					}
 				}
 
@@ -316,19 +320,23 @@ func (p *P2pConn) tcpWriteLoopFor(p2pc *P2pClient, c *Client) error {
 			case common.MsgTypeFin, common.MsgTypeSynErr:
 				//common.Info("kill by remote", atomic.LoadInt32(&p.wLen))
 				p.Kill(common.ErrMsgWrite)
-				return common.ErrMsgWrite
+				err_rlt = common.ErrMsgWrite
+				return
 			}
 
 		} else {
 			//Killed, just return error
 			//common.Warn("tcpwrite error")
-			return common.ErrMsgWrite
+			err_rlt = common.ErrMsgWrite
+			return
 		}
 	case <-p.Dying():
 		//Killed, just return error
-		return common.ErrMsgWrite
+		err_rlt = common.ErrMsgWrite
+		return
 	}
-	return nil
+	err_rlt = nil
+	return
 }
 
 func (p *P2pConn) tcpWriteLoop(p2pc *P2pClient, c *Client) {

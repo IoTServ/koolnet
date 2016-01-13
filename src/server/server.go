@@ -224,6 +224,11 @@ func (s *ServerMgr) registAssist(conn net.Conn, msg *common.Msg) (*Assist, error
 	defer msg.Free()
 
 	regMsg := msg.GetReal().(*common.MsgAssistReg)
+	if regMsg.Pass != common.AssPass {
+		//TODO do better hear
+		return nil, common.ErrMsgNotSupport
+	}
+
 	ss := strings.Split(regMsg.Addr, ":")
 	tcpIp := fmt.Sprintf("%v", conn.(*tls.Conn).RemoteAddr().(*net.TCPAddr).IP)
 	regMsg.Addr = tcpIp + ":" + ss[len(ss)-1]

@@ -10,10 +10,11 @@ import (
 
 	"github.com/icholy/killable"
 	//"encoding/json"
-	//"strconv"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
+	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -89,8 +90,8 @@ func configInit() *ClientConfig {
 	var name = flag.String("user", "user01", "Your username")
 	var loglevel = flag.Int("level", 0, "Log level")
 	flag.Usage = func() {
-		fmt.Printf("Usage: p2ptunnel -listen=\"192.168.1.1:80;127.0.0.1:8800\" -server=ngrok.wang:18886 -password=hello\n\n")
-		fmt.Printf("By Xiaobao, contact me at http://koolshare.cn\n\n")
+		fmt.Printf("Usage: koolnet -listen=\"192.168.1.1:80;127.0.0.1:8800\" -server=ngrok.wang:18886 -password=hello\n\n")
+		fmt.Printf("Version 0.3 By Xiaobao, contact me at http://koolshare.cn\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -98,6 +99,47 @@ func configInit() *ClientConfig {
 	var iv []byte = nil
 	kind := common.KindListen
 	var items []common.TunnelItem = nil
+
+	if len(os.Args) == 2 && os.Args[1][0] != '-' {
+		if conf, err := readConfig(os.Args[1]); err == nil {
+			if len(conf.Listen) == 0 {
+				kind = "request"
+			} else {
+				items = make([]common.TunnelItem, 0, 8)
+				for _, v1 := range conf.Listen {
+					v2 := strings.Split(v1, ";")
+					if len(v2) == 2 {
+						items = append(items, common.TunnelItem{ProxyAddr: v2[0], LocalAddr: v2[1]})
+					} else {
+						log.Fatal("listen string error")
+					}
+				}
+				if len(items) == 0 {
+					log.Fatal("listen string is not parsed")
+				}
+				var err error
+				if iv, err = common.GenerateRandomBytes(aes.BlockSize); err != nil {
+					log.Fatal("ganerate random bytes error", err)
+				}
+			}
+			if conf.Server == "" {
+				conf.Server = "ngrok.wang"
+				conf.Port = 18886
+			}
+
+			return &ClientConfig{
+				kind:       kind,
+				space:      conf.User,
+				password:   conf.Password,
+				serverAddr: conf.Server + ":" + strconv.Itoa(conf.Port),
+				tunnels:    items,
+				iv:         iv,
+			}
+		}
+
+		items = nil
+	}
+
 	if *listen == "" {
 		kind = "request"
 	} else {
@@ -444,7 +486,14 @@ func (c *Client) handleIncomeMsg(msg *common.Msg) {
 	}
 }
 
-func (c *Client) tcpReadLoopFor() error {
+func (c *Client) tcpReadLoopFor() (err_rlt error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_rlt = fmt.Errorf("Panic: %v", r)
+		}
+	}()
+	err_rlt = nil
+
 	conn := c.tcpConn
 	conn.SetReadDeadline(time.Now().Add(common.TcpClientReadLoopSec))
 	if msg, err := common.ReadTcpMsg(conn); err == nil {
@@ -455,13 +504,14 @@ func (c *Client) tcpReadLoopFor() error {
 		case <-c.Dying():
 			return common.ErrMsgKilled
 		case c.in <- msg.Dup():
-			return nil
+			return
 		}
 	} else {
 		c.Kill(common.ErrMsgRead)
-		return common.ErrMsgRead
+		err_rlt = common.ErrMsgRead
+		return
 	}
-	return nil
+	return
 }
 
 func (c *Client) tcpReadLoop() {
@@ -473,7 +523,14 @@ func (c *Client) tcpReadLoop() {
 	}
 }
 
-func (c *Client) tcpWriteLoopFor() error {
+func (c *Client) tcpWriteLoopFor() (err_rlt error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_rlt = fmt.Errorf("Panic: %v", r)
+		}
+	}()
+	err_rlt = nil
+
 	conn := c.tcpConn
 	select {
 	case <-c.Dying():
@@ -483,12 +540,13 @@ func (c *Client) tcpWriteLoopFor() error {
 			defer msg.Free()
 			conn.SetWriteDeadline(time.Now().Add(common.TcpClientWriteLoopSec))
 			if err := common.WriteTcpMsg(conn, msg.Dup()); err == nil {
-				return nil
+				return
 			}
 		}
 
 		c.Kill(common.ErrMsgWrite)
-		return common.ErrMsgWrite
+		err_rlt = common.ErrMsgWrite
+		return
 	}
 
 	return nil
@@ -592,14 +650,16 @@ func (l *LocalListen) newConn(conn net.Conn, c *Client) {
 func ClientMain() {
 	common.MsgPoolInit()
 	conf := configInit()
+	//log.Println(conf)
 
 	for {
-		startClient(conf)
+		err := startClient(conf)
 
 		if conf.kind == common.KindListen {
-			common.Warn("waiting for 20s for reconnect")
+			common.Warn("waiting for 20s for reconnect", err)
 			time.Sleep(20 * time.Second)
 		} else {
+			common.Warn("error found: ", err)
 			break
 		}
 	}

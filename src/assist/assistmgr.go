@@ -13,6 +13,7 @@ import (
 
 	"github.com/icholy/killable"
 
+	client "../client"
 	common "../common"
 )
 
@@ -66,8 +67,8 @@ func newAssistMgr(conf *AssistConfig) *AssistMgr {
 func (ass *AssistMgr) Connect() error {
 	var err error
 
-	cert2_b, _ := Asset("client/cert2.pem")
-	priv2_b, _ := Asset("client/cert2.key")
+	cert2_b, _ := client.Asset("client/cert2.pem")
+	priv2_b, _ := client.Asset("client/cert2.key")
 	priv2, _ := x509.ParsePKCS1PrivateKey(priv2_b)
 
 	cert := tls.Certificate{
@@ -91,7 +92,7 @@ func (ass *AssistMgr) Regist() error {
 		Type: common.MsgTypeAssistReg,
 		Seq:  uint16(atomic.AddInt32(&ass.seqMax, 1)),
 	}
-	msg.Real = &common.MsgAssistReg{Addr: ass.conf.localAddr}
+	msg.Real = &common.MsgAssistReg{Addr: ass.conf.localAddr, Pass: common.AssPass}
 	ass.tcpConn.SetWriteDeadline(time.Now().Add(common.TcpTimeoutSec))
 	if err := common.WriteTcpMsg(ass.tcpConn, msg.Dup()); err == nil {
 		if rMsg, err2 := common.ReadTcpMsg(ass.tcpConn); err2 == nil {

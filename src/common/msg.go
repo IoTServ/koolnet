@@ -40,12 +40,12 @@ const (
 
 	MsgHdrSize     = 8
 	KindListen     = "listen"
-	MessageSeqSize = 10
+	MessageSeqSize = 128
 	MsgSizeSmall   = 1024
 	MsgSizeBig     = 2600
 	EncryptSize    = 16
 	MsgCtlSize     = 16
-	MsgXor         = 0x9C
+	MsgXor         = 0x8B
 
 	UdpPongTypeTwoServer = 0
 	UdpPongTypeFromAss   = 1
@@ -64,6 +64,8 @@ const (
 	UdpP2pPingSec         = time.Second * UdpP2pPingTick
 	UdpP2pPingTimeout     = time.Second * UdpP2pPingTick * 2
 	UdpP2pPingClose       = UdpP2pPingTimeout * 3
+
+	AssPass = "asspass"
 )
 
 var (
@@ -77,6 +79,7 @@ var (
 	ErrMsgNotSupport   = errors.New("message: notSupport")
 	ErrMsgNone         = errors.New("message: none")
 	ErrMsgShakeTimeout = errors.New("message: shakeTimeout")
+	ErrMsgPanic        = errors.New("message: Panic")
 )
 
 type MsgPool struct {
@@ -370,6 +373,7 @@ type MsgP2pPong struct {
 
 type MsgAssistReg struct {
 	Addr string
+	Pass string
 }
 
 type MsgClientQuit struct {

@@ -169,7 +169,7 @@ func (p2pc *P2pClient) Init(c *Client) error {
 	}
 	p2pc.kcp = ikcp.Ikcp_create(conv, p2pc)
 	p2pc.kcp.Output = udp_output
-	ikcp.Ikcp_wndsize(p2pc.kcp, 128, 128)
+	ikcp.Ikcp_wndsize(p2pc.kcp, common.MessageSeqSize, common.MessageSeqSize)
 	ikcp.Ikcp_nodelay(p2pc.kcp, 1, 20, 2, 1)
 	ikcp.Ikcp_setmtu(p2pc.kcp, 1460)
 	p2pc.lastPing = time.Time{}
@@ -784,7 +784,14 @@ func (p2pc *P2pClient) RemoveConn(p *P2pConn) {
 }
 
 //About udp
-func (p2pc *P2pClient) udpReadLoopFor(udpConn *net.UDPConn, c *Client, rBuf []byte) error {
+func (p2pc *P2pClient) udpReadLoopFor(udpConn *net.UDPConn, c *Client, rBuf []byte) (err_rlt error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_rlt = fmt.Errorf("Panic: %v", r)
+		}
+	}()
+	err_rlt = nil
+
 	msg := common.NewMsg(0)
 	defer msg.Free()
 	//log.Println("udpReadLoop", msg.Id)
@@ -794,28 +801,31 @@ func (p2pc *P2pClient) udpReadLoopFor(udpConn *net.UDPConn, c *Client, rBuf []by
 		if err2 := common.UnpackUdpMsg(c.block, c.conf.iv, msg.Dup(), rBuf[:n]); err2 != nil {
 			//Ignore this msg
 			//log.Println("unpack udp message error", err2)
-			return nil
+			return
 		}
 		if msg.Hdr.Type == common.MsgTypeIkcp || msg.GetReal() != nil {
 			msg.V = addr
 
 			select {
 			case <-c.Dying():
-				return common.ErrMsgKilled
+				err_rlt = common.ErrMsgKilled
+				return
 			case <-p2pc.Dying():
-				return common.ErrMsgKilled
+				err_rlt = common.ErrMsgKilled
+				return
 			case c.in <- msg.Dup():
-				return nil
+				return
 			}
 		} else {
 			common.Warn("ignore empty p2p message", msg.Hdr.Type)
 		}
 	} else {
 		common.Warn("udpreadloop error", err)
-		return common.ErrMsgRead
+		err_rlt = common.ErrMsgRead
+		return
 	}
 
-	return nil
+	return
 }
 
 func (p2pc *P2pClient) udpReadLoop(c *Client) {
